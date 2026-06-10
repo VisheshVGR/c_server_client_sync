@@ -1,7 +1,61 @@
 #include <iostream>
 #include <winsock2.h>
+#include <cstring>
+#include <cstdint>
 
 using namespace std;
+
+static bool send_all(SOCKET sock, const char *data, int length)
+{
+    int total_sent = 0;
+    while (total_sent < length)
+    {
+        int sent = send(sock, data + total_sent, length - total_sent, 0);
+        if (sent == SOCKET_ERROR)
+            return false;
+        total_sent += sent;
+    }
+    return true;
+}
+
+static bool recv_all(SOCKET sock, char *buffer, int length)
+{
+    int total_received = 0;
+    while (total_received < length)
+    {
+        int received = recv(sock, buffer + total_received, length - total_received, 0);
+        if (received <= 0)
+            return false;
+        total_received += received;
+    }
+    return true;
+}
+
+static bool send_message(SOCKET sock, const char *message)
+{
+    uint32_t payload_length = static_cast<uint32_t>(strlen(message));
+    uint32_t network_length = htonl(payload_length);
+    if (!send_all(sock, reinterpret_cast<const char *>(&network_length), sizeof(network_length)))
+        return false;
+    return payload_length == 0 || send_all(sock, message, payload_length);
+}
+
+static bool recv_message(SOCKET sock, char *buffer, int buffer_size)
+{
+    uint32_t network_length = 0;
+    if (!recv_all(sock, reinterpret_cast<char *>(&network_length), sizeof(network_length)))
+        return false;
+
+    uint32_t payload_length = ntohl(network_length);
+    if (payload_length >= static_cast<uint32_t>(buffer_size))
+        return false;
+
+    if (payload_length > 0 && !recv_all(sock, buffer, payload_length))
+        return false;
+
+    buffer[payload_length] = '\0';
+    return true;
+}
 
 int main()
 {
@@ -10,9 +64,13 @@ int main()
     // Initialize Winsock for this process.
     // MAKEWORD(2, 2) requests Winsock version 2.2.
     // wsa receives implementation-specific information.
-    WSAStartup(MAKEWORD(2, 2), &wsa);
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+    {
+        cout << "WSAStartup failed: " << WSAGetLastError() << "\n";
+        return 1;
+    }
 
-    int sockfd;
+    SOCKET sockfd;
     sockaddr_in server_addr;
     char buffer[1024];
 
@@ -33,7 +91,8 @@ int main()
 
     if (sockfd == INVALID_SOCKET)
     {
-        cout << "Socket creation failed\n";
+        cout << "Socket creation failed: " << WSAGetLastError() << "\n";
+        WSACleanup();
         return 1;
     }
 
@@ -57,12 +116,13 @@ int main()
 
     if (result == SOCKET_ERROR)
     {
-        cout << "Connection failed - Server rejected or unreachable\n";
+        cout << "Connection failed - Server rejected or unreachable: " << WSAGetLastError() << "\n";
         // You can:
         // 1. Retry after a delay
         // 2. Try a different server
         // 3. Exit gracefully
         closesocket(sockfd);
+        WSACleanup();
         return 1;
     }
 
@@ -74,25 +134,22 @@ int main()
         cout << "Client: ";
         cin.getline(buffer, sizeof(buffer));
 
-        // send(socket, buffer, len, flags)
-        //   socket: connected socket descriptor.
-        //   buffer: data to send.
-        //   len: number of bytes to send.
-        //   flags: normally 0; other values include MSG_OOB, MSG_DONTROUTE.
-        send(sockfd, buffer, strlen(buffer) + 1, 0);
+        if (!send_message(sockfd, buffer))
+        {
+            cout << "Failed to send message\n";
+            break;
+        }
 
         // Exit condition
         if (string(buffer) == "q")
             break;
 
         // Receive response
-        // recv(socket, buffer, len, flags)
-        //   socket: connected socket descriptor.
-        //   buffer: storage for received bytes.
-        //   len: maximum bytes to read.
-        //   flags: normally 0; other values include MSG_PEEK, MSG_WAITALL.
-        // Returns number of bytes received, 0 if connection closed, SOCKET_ERROR on error.
-        recv(sockfd, buffer, sizeof(buffer), 0);
+        if (!recv_message(sockfd, buffer, sizeof(buffer)))
+        {
+            cout << "Failed to receive response\n";
+            break;
+        }
 
         cout << "\nServer: " << buffer << endl;
 

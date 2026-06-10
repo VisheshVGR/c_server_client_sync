@@ -1,0 +1,7 @@
+# Ignore compiled Windows executables
+*.exe
+*.obj
+*.o
+*.lib
+*.pch
+*.pdb

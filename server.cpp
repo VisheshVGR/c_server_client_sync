@@ -1,7 +1,61 @@
 #include <iostream>
 #include <winsock2.h>
+#include <cstring>
+#include <cstdint>
 
 using namespace std;
+
+static bool send_all(SOCKET sock, const char *data, int length)
+{
+    int total_sent = 0;
+    while (total_sent < length)
+    {
+        int sent = send(sock, data + total_sent, length - total_sent, 0);
+        if (sent == SOCKET_ERROR)
+            return false;
+        total_sent += sent;
+    }
+    return true;
+}
+
+static bool recv_all(SOCKET sock, char *buffer, int length)
+{
+    int total_received = 0;
+    while (total_received < length)
+    {
+        int received = recv(sock, buffer + total_received, length - total_received, 0);
+        if (received <= 0)
+            return false;
+        total_received += received;
+    }
+    return true;
+}
+
+static bool send_message(SOCKET sock, const char *message)
+{
+    uint32_t payload_length = static_cast<uint32_t>(strlen(message));
+    uint32_t network_length = htonl(payload_length);
+    if (!send_all(sock, reinterpret_cast<const char *>(&network_length), sizeof(network_length)))
+        return false;
+    return payload_length == 0 || send_all(sock, message, payload_length);
+}
+
+static bool recv_message(SOCKET sock, char *buffer, int buffer_size)
+{
+    uint32_t network_length = 0;
+    if (!recv_all(sock, reinterpret_cast<char *>(&network_length), sizeof(network_length)))
+        return false;
+
+    uint32_t payload_length = ntohl(network_length);
+    if (payload_length >= static_cast<uint32_t>(buffer_size))
+        return false;
+
+    if (payload_length > 0 && !recv_all(sock, buffer, payload_length))
+        return false;
+
+    buffer[payload_length] = '\0';
+    return true;
+}
 
 int main()
 {
@@ -9,9 +63,13 @@ int main()
     // Initialize Winsock for this process.
     // MAKEWORD(2, 2) requests version 2.2 of the Winsock API.
     // The wsa variable receives implementation-specific details and status.
-    WSAStartup(MAKEWORD(2, 2), &wsa);
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+    {
+        cout << "WSAStartup failed: " << WSAGetLastError() << "\n";
+        return 1;
+    }
 
-    int server_fd, client_fd;
+    SOCKET server_fd, client_fd;
 
     sockaddr_in server_addr, client_addr;
 
@@ -56,16 +114,30 @@ int main()
     //   address: pointer to sockaddr structure with IP and port.
     //   address_len: size of the address structure.
     // Return value: 0 on success, SOCKET_ERROR on failure.
-    bind(server_fd,
-         (sockaddr *)&server_addr,
-         sizeof(server_addr));
+    int bind_result = bind(server_fd,
+                              (sockaddr *)&server_addr,
+                              sizeof(server_addr));
+    if (bind_result == SOCKET_ERROR)
+    {
+        cout << "Bind failed: " << WSAGetLastError() << "\n";
+        closesocket(server_fd);
+        WSACleanup();
+        return 1;
+    }
 
     // listen(socket, backlog)
     //   socket: listening socket descriptor.
     //   backlog: maximum number of pending connections in queue.
     //   Common values: 1, 5, 10, SOMAXCONN. Larger backlog allows more waiting clients.
     // Return value: 0 on success, SOCKET_ERROR on failure.
-    listen(server_fd, 1);
+    int listen_result = listen(server_fd, 1);
+    if (listen_result == SOCKET_ERROR)
+    {
+        cout << "Listen failed: " << WSAGetLastError() << "\n";
+        closesocket(server_fd);
+        WSACleanup();
+        return 1;
+    }
 
     int addrlen = sizeof(client_addr);
 
@@ -84,6 +156,12 @@ int main()
                            (sockaddr *)&client_addr,
                            &addrlen);
 
+        if (client_fd == INVALID_SOCKET)
+        {
+            cout << "Accept failed: " << WSAGetLastError() << "\n";
+            break;
+        }
+
         cout << "Client connected (Timeout 50sec)\n";
 
         // CHAT WITH CLIENT
@@ -101,27 +179,15 @@ int main()
 
             // Receive data from the client.
             // n is the number of bytes received, or SOCKET_ERROR on failure.
-            int n = recv(client_fd, clientbuffer, sizeof(clientbuffer), 0);
-
-            if (n == 0)
+            if (!recv_message(client_fd, clientbuffer, sizeof(clientbuffer)))
             {
-                cout << "ERROR: Client disconnected\n";
-                break;
-            }
-            else if (n == SOCKET_ERROR)
-            {
-                cout << "ERROR: Timeout or error\n"; // Timeout occurred
+                cout << "ERROR: Failed to receive client data or timeout\n";
                 break;
             }
 
-            // Ensure null-termination within bounds
-            clientbuffer[min(n, (int)sizeof(clientbuffer) - 1)] = '\0';
-
-            // CLIENT Exit condition
             if (string(clientbuffer) == "q")
             {
                 cout << "Client EXITED\n";
-
                 break;
             }
 
@@ -136,16 +202,15 @@ int main()
                 // Exit condition for the server side.
                 cout << "EXITED\n";
 
-                // Send a final notification to the client.
-                // strlen(...)+1 includes the terminating null byte.
-                send(client_fd, "SERVER EXITED", strlen("SERVER EXITED") + 1, 0);
+                if (!send_message(client_fd, "SERVER EXITED"))
+                    cout << "ERROR: Failed to send exit notice\n";
 
                 break;
             }
-            else
+            else if (!send_message(client_fd, serverbuffer))
             {
-                // Send the typed server response back to the client.
-                send(client_fd, serverbuffer, strlen(serverbuffer) + 1, 0);
+                cout << "ERROR: Failed to send response\n";
+                break;
             }
         }
 

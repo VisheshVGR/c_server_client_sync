@@ -34,6 +34,7 @@ This project demonstrates basic client-server communication using TCP/IP sockets
   - `socket()` - Creates a TCP socket
   - `connect()` - Connects to server
   - `send()` / `recv()` - Communicates with server
+  - `htonl()` / `ntohl()` - Converts message lengths to/from network byte order
 
 ## How to Use
 
@@ -110,7 +111,7 @@ Client: q
 - **Connection**: Localhost (`127.0.0.1`) on port `8080`
 - **Buffer Size**: 1024 bytes for messages
 - **Timeout**: Server has a 50-second receive timeout per client
-- **Message Format**: Null-terminated strings
+- **Message Format**: 32-bit length prefix in network byte order (big-endian), followed by the message bytes
 
 ## Limitations
 
